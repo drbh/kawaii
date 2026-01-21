@@ -1,5 +1,6 @@
 use kawaii::{
-    coalesce, complement, composition, int, logical_divide, logical_product, IntTuple, Layout,
+    blocked_product, coalesce, complement, composition, int, logical_divide, logical_product,
+    IntTuple, Layout,
 };
 
 // Property tests for layout algebra
@@ -148,4 +149,28 @@ fn test_composition_with_identity() {
     for i in 0..a.size() {
         assert_eq!(a.call_1d(i), result.call_1d(i), "Mismatch at index {}", i);
     }
+}
+
+#[test]
+fn test_hierarchical_morton_code() {
+    // Build hierarchical morton code via blocked_product
+    let morton1 = Layout::new(int!(2, 2), Some(int!(1, 2)));
+    let morton2 = blocked_product(&morton1, &morton1);
+    let morton3 = blocked_product(&morton1, &morton2);
+
+    // morton3 should be an 8x8 layout with Z-order curve indexing
+    assert_eq!(morton3.size(), 64);
+
+    // All coordinate forms should map to the same linear index (49)
+    // 1D coordinate
+    assert_eq!(morton3.call(&int!(37)), 49);
+    // 2D coordinate (row 5, col 4)
+    assert_eq!(morton3.call(&int!(5, 4)), 49);
+    // Hierarchical 2D coordinate
+    assert_eq!(morton3.call(&int!(int!(1, 2), int!(0, 2))), 49);
+    // Fully hierarchical coordinate
+    assert_eq!(
+        morton3.call(&int!(int!(1, int!(0, 1)), int!(0, int!(0, 1)))),
+        49
+    );
 }

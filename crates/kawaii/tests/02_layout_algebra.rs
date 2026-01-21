@@ -1,12 +1,11 @@
 use kawaii::{
-    coalesce, coalesce_by_mode, complement, composition, composition_with_tile, flat_divide, int,
-    logical_divide, logical_divide_with_tile, logical_product, tiled_divide, zipped_divide,
-    IntTuple, Layout, Tile,
+    blocked_product, coalesce, coalesce_by_mode, complement, composition, composition_with_tile,
+    flat_divide, int, logical_divide, logical_divide_with_tile, logical_product, raked_product,
+    tiled_divide, zipped_divide, IntTuple, Layout, Tile,
 };
 
 // coalesce
 // https://docs.nvidia.com/cutlass/latest/media/docs/cpp/cute/02_layout_algebra.html#coalesce
-
 #[test]
 fn test_layout_algebra_coalesce() {
     // (2,(1,6)):(1,(6,2)) => 12:1
@@ -17,7 +16,6 @@ fn test_layout_algebra_coalesce() {
 
 // by-mode-coalesce
 // https://docs.nvidia.com/cutlass/latest/media/docs/cpp/cute/02_layout_algebra.html#by-mode-coalesce
-
 #[test]
 fn test_layout_algebra_by_mode_coalesce() {
     // (2,(1,6)):(1,(6,2)) with profile (1,1) => (2,6):(1,2)
@@ -28,7 +26,6 @@ fn test_layout_algebra_by_mode_coalesce() {
 
 // composition
 // https://docs.nvidia.com/cutlass/latest/media/docs/cpp/cute/02_layout_algebra.html#composition
-
 #[test]
 fn test_layout_algebra_composition() {
     // A = (6,2):(8,2), B = (4,3):(3,1)
@@ -41,7 +38,6 @@ fn test_layout_algebra_composition() {
 
 // computing-composition
 // https://docs.nvidia.com/cutlass/latest/media/docs/cpp/cute/02_layout_algebra.html#computing-composition
-
 #[test]
 fn test_layout_algebra_computing_composition() {
     // Example 1: A = (6,2):(8,2), B = (4,3):(3,1)
@@ -69,7 +65,6 @@ fn test_layout_algebra_computing_composition() {
 
 // by-mode-composition
 // https://docs.nvidia.com/cutlass/latest/media/docs/cpp/cute/02_layout_algebra.html#by-mode-composition
-
 #[test]
 fn test_layout_algebra_by_mode_composition() {
     // a = (12,(4,8)):(59,(13,1))
@@ -101,7 +96,6 @@ fn test_layout_algebra_by_mode_composition() {
 
 // complement
 // https://docs.nvidia.com/cutlass/latest/media/docs/cpp/cute/02_layout_algebra.html#complement
-
 #[test]
 fn test_layout_algebra_complement() {
     // complement(4:1, 24) is 6:4
@@ -137,7 +131,6 @@ fn test_layout_algebra_complement() {
 
 // division-tiling
 // https://docs.nvidia.com/cutlass/latest/media/docs/cpp/cute/02_layout_algebra.html#division-tiling
-
 #[test]
 fn test_layout_algebra_division_tiling() {
     // 1-D Example
@@ -169,7 +162,6 @@ fn test_layout_algebra_division_tiling() {
 
 // zipped-tiled-flat-divides
 // https://docs.nvidia.com/cutlass/latest/media/docs/cpp/cute/02_layout_algebra.html#zipped-tiled-flat-divides
-
 #[test]
 fn test_layout_algebra_zipped_tiled_flat_divides() {
     // A: shape is (9,32) = (9,(4,8)):(59,(13,1))
@@ -209,7 +201,6 @@ fn test_layout_algebra_zipped_tiled_flat_divides() {
 
 // product-tiling
 // https://docs.nvidia.com/cutlass/latest/media/docs/cpp/cute/02_layout_algebra.html#product-tiling
-
 #[test]
 fn test_layout_algebra_product_tiling() {
     // 1-D Example
@@ -236,4 +227,31 @@ fn test_layout_algebra_product_tiling() {
 
     // Second mode iterates over 8 tiles
     assert_eq!(result2.mode(1).size(), 8);
+}
+
+// blocked-and-raked-products
+// https://docs.nvidia.com/cutlass/latest/media/docs/cpp/cute/02_layout_algebra.html#blocked-and-raked-products
+#[test]
+fn test_layout_algebra_blocked_raked_products() {
+    // A = (2,5):(5,1) - a 2x5 row-major tile
+    let a = Layout::new(int!(2, 5), Some(int!(5, 1)));
+
+    // B = (3,4):(1,3) - a 3x4 column-major arrangement
+    let b = Layout::new(int!(3, 4), Some(int!(1, 3)));
+
+    // blocked_product: A ☒ B = (6,(5,4)):(5,(1,30))
+    // A 2x5 tile arranged in a 3x4 blocked pattern
+    let blocked = blocked_product(&a, &b);
+    assert_eq!(blocked.to_string(), "(6,(5,4)):(5,(1,30))");
+
+    // Total size should be A.size * B.size = 10 * 12 = 120
+    assert_eq!(blocked.size(), 120);
+
+    // raked_product: A ⊡ B = ((3,2),(4,5)):((10,5),(30,1))
+    // A 2x5 tile interleaved/raked with a 3x4 pattern
+    let raked = raked_product(&a, &b);
+    assert_eq!(raked.to_string(), "((3,2),(4,5)):((10,5),(30,1))");
+
+    // Total size should also be 120
+    assert_eq!(raked.size(), 120);
 }

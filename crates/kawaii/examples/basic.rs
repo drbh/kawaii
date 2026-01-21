@@ -1,15 +1,35 @@
 use kawaii::{int, print_2d, IntTuple, Layout};
 
-fn main() {
-    // Create a 4x6 matrix layout (column-major by default)
-    let mut layout = Layout::new(int!(4, 6), Some(int!([1, 4])));
+// Based on quick example in
+// https://youtu.be/vzUhbDO_0qk?t=2160
 
-    println!("Column-major 4x3 layout:");
+fn main() {
+    // Create a 4x8 matrix layout (column-major by default)
+    let mut layout = Layout::new(int!(4, 8), Some(int!(1, 4)));
+
+    println!("Column-major");
     println!("{}", print_2d(&layout));
 
     // now make it row-major by updating the strides
-    layout.stride = int!([6, 1]);
-    println!("Row-major 4x3 layout:");
+    layout.stride = int!(8, 1);
+    println!("Row-major");
+    println!("{}", print_2d(&layout));
+
+    // now make it col-major padded
+    layout.stride = int!(1, 5);
+    println!("Column-major padded");
+    println!("{}", print_2d(&layout));
+
+    // now make it col-major interleave
+    layout.shape = int!(4, int!(4, 2));
+    layout.stride = int!(4, int!(1, 16));
+    println!("Column-major interleave");
+    println!("{}", print_2d(&layout));
+
+    // now make it mixed
+    layout.shape = int!(int!(2, 2), int!(4, 2));
+    layout.stride = int!(int!(1, 8), int!(2, 16));
+    println!("Column-major interleave");
     println!("{}", print_2d(&layout));
 
     // Access some linear indices

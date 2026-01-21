@@ -457,12 +457,51 @@ fn crd2idx_impl(coord: &IntTuple, shape: &IntTuple, stride: &IntTuple) -> i64 {
             result
         }
 
-        (IntTuple::Tuple(coords), IntTuple::Tuple(shapes), IntTuple::Tuple(strides)) => coords
-            .iter()
-            .zip(shapes.iter())
-            .zip(strides.iter())
-            .map(|((c, s), d)| crd2idx_impl(c, s, d))
-            .sum(),
+        (IntTuple::Tuple(coords), IntTuple::Tuple(shapes), IntTuple::Tuple(strides)) => {
+            // Handle hierarchical coordinates where coord may have fewer elements than shape
+            // Each coord element maps to shape elements, with the last coord element
+            // potentially spanning multiple remaining shape elements
+            if coords.len() == shapes.len() {
+                // Same length - standard case
+                coords
+                    .iter()
+                    .zip(shapes.iter())
+                    .zip(strides.iter())
+                    .map(|((c, s), d)| crd2idx_impl(c, s, d))
+                    .sum()
+            } else if coords.len() < shapes.len() {
+                // Hierarchical: coord is shorter, last element spans remaining shape
+                let mut result = 0i64;
+                for i in 0..coords.len() - 1 {
+                    result += crd2idx_impl(&coords[i], &shapes[i], &strides[i]);
+                }
+                // Last coord element spans remaining shape elements
+                let remaining_shapes = IntTuple::Tuple(shapes[coords.len() - 1..].to_vec());
+                let remaining_strides = IntTuple::Tuple(strides[coords.len() - 1..].to_vec());
+                result += crd2idx_impl(
+                    coords.last().unwrap(),
+                    &remaining_shapes,
+                    &remaining_strides,
+                );
+                result
+            } else {
+                panic!("coordinate has more elements than shape")
+            }
+        }
+
+        // Handle tuple coord with int shape (flatten the coord)
+        (IntTuple::Tuple(coords), IntTuple::Int(_s), IntTuple::Int(d)) => {
+            // Treat tuple coord as a hierarchical index into a 1D shape
+            // Convert the tuple to a 1D index first
+            let flat_idx = coords.iter().fold(0i64, |acc, c| {
+                let c_val = match c {
+                    IntTuple::Int(v) => *v,
+                    IntTuple::Tuple(_) => c.size(), // flatten nested tuples
+                };
+                acc + c_val
+            });
+            flat_idx * d
+        }
 
         _ => panic!("mismatched structures in crd2idx"),
     }
@@ -1043,6 +1082,131 @@ pub fn flat_divide(layout: &Layout, tile: &Tile) -> Layout {
     Layout {
         shape: IntTuple::Tuple(result_shapes),
         stride: IntTuple::Tuple(result_strides),
+    }
+}
+
+// Blocked and Raked Products
+
+/// Blocked product: arranges layout A as tiles in a B arrangement.
+/// Result mode-i = (A_mode_i, B_mode_i), then coalesces each mode.
+/// A ☒ B = (2,5):(5,1) ☒ (3,4):(1,3) = (6,(5,4)):(5,(1,30))
+pub fn blocked_product(layout_a: &Layout, layout_b: &Layout) -> Layout {
+    // Get ranks of original layouts
+    let rank_a = layout_a.rank();
+    let rank_b = layout_b.rank();
+    let max_rank = rank_a.max(rank_b);
+
+    // Reassociate modes: for each mode i, combine (A_i, B_i)
+    let mut result_shapes = Vec::with_capacity(max_rank);
+    let mut result_strides = Vec::with_capacity(max_rank);
+
+    for i in 0..max_rank {
+        let a_mode = if i < rank_a {
+            layout_a.mode(i)
+        } else {
+            Layout::new(1i64, Some(IntTuple::Int(0)))
+        };
+        let b_mode = if i < rank_b {
+            layout_b.mode(i)
+        } else {
+            Layout::new(1i64, Some(IntTuple::Int(0)))
+        };
+
+        // For blocked: (A_i, B_i) with B's stride scaled by A's cosize
+        let a_cosize = layout_a.cosize();
+        let scaled_b = scale_stride(&b_mode, a_cosize);
+
+        // Combine and coalesce
+        let combined = Layout {
+            shape: IntTuple::Tuple(vec![a_mode.shape.clone(), scaled_b.shape]),
+            stride: IntTuple::Tuple(vec![a_mode.stride.clone(), scaled_b.stride]),
+        };
+        let coalesced = coalesce(&combined);
+
+        result_shapes.push(coalesced.shape);
+        result_strides.push(coalesced.stride);
+    }
+
+    if result_shapes.len() == 1 {
+        Layout {
+            shape: result_shapes.pop().unwrap(),
+            stride: result_strides.pop().unwrap(),
+        }
+    } else {
+        Layout {
+            shape: IntTuple::Tuple(result_shapes),
+            stride: IntTuple::Tuple(result_strides),
+        }
+    }
+}
+
+/// Raked product: interleaves layout A with B (cyclic distribution).
+/// Result mode-i = (B_mode_i, A_mode_i).
+/// A ⊡ B = (2,5):(5,1) ⊡ (3,4):(1,3) = ((3,2),(4,5)):((10,5),(30,1))
+pub fn raked_product(layout_a: &Layout, layout_b: &Layout) -> Layout {
+    // Get ranks of original layouts
+    let rank_a = layout_a.rank();
+    let rank_b = layout_b.rank();
+    let max_rank = rank_a.max(rank_b);
+
+    let a_cosize = layout_a.cosize();
+
+    // Reassociate modes: for each mode i, combine (B_i, A_i) - reversed order from blocked
+    let mut result_shapes = Vec::with_capacity(max_rank);
+    let mut result_strides = Vec::with_capacity(max_rank);
+
+    for i in 0..max_rank {
+        let a_mode = if i < rank_a {
+            layout_a.mode(i)
+        } else {
+            Layout::new(1i64, Some(IntTuple::Int(0)))
+        };
+        let b_mode = if i < rank_b {
+            layout_b.mode(i)
+        } else {
+            Layout::new(1i64, Some(IntTuple::Int(0)))
+        };
+
+        // For raked: (B_i, A_i) with B's stride scaled by A's cosize
+        let scaled_b = scale_stride(&b_mode, a_cosize);
+
+        // Combine (B first, then A) - this is the key difference from blocked
+        let combined = Layout {
+            shape: IntTuple::Tuple(vec![scaled_b.shape, a_mode.shape.clone()]),
+            stride: IntTuple::Tuple(vec![scaled_b.stride, a_mode.stride.clone()]),
+        };
+
+        result_shapes.push(combined.shape);
+        result_strides.push(combined.stride);
+    }
+
+    if result_shapes.len() == 1 {
+        Layout {
+            shape: result_shapes.pop().unwrap(),
+            stride: result_strides.pop().unwrap(),
+        }
+    } else {
+        Layout {
+            shape: IntTuple::Tuple(result_shapes),
+            stride: IntTuple::Tuple(result_strides),
+        }
+    }
+}
+
+/// Scale all strides in a layout by a factor.
+fn scale_stride(layout: &Layout, factor: i64) -> Layout {
+    fn scale_int_tuple(t: &IntTuple, factor: i64) -> IntTuple {
+        match t {
+            IntTuple::Int(n) => IntTuple::Int(n * factor),
+            IntTuple::Tuple(v) => {
+                IntTuple::Tuple(v.iter().map(|x| scale_int_tuple(x, factor)).collect())
+            }
+        }
+    }
+
+    Layout {
+        shape: layout.shape.clone(),
+        stride: scale_int_tuple(&layout.stride, factor),
     }
 }
 
