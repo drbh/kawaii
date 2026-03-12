@@ -369,3 +369,39 @@ fn col_major_indices_match_expectations() {
     assert!(layout.contains(0, 0));
     assert!(!layout.contains(3, 4));
 }
+
+#[test]
+fn to_flat_preserves_index_computation() {
+    // Hierarchical layout: ((2,3),5,7):((1,2),6,30)
+    let layout = Layout::new(int!(2, 3, 5, 7), None);
+    let flat = layout.to_flat();
+
+    // Every 1D index should produce the same result
+    for i in 0..layout.size() {
+        assert_eq!(layout.call_1d(i), flat.call_1d(i), "mismatch at 1d index {i}");
+    }
+    assert_eq!(layout.cosize(), flat.cosize());
+    assert_eq!(layout.size(), flat.size());
+}
+
+#[test]
+fn to_flat_row_major_matches() {
+    let layout = Layout::row_major(4, 8);
+    let flat = layout.to_flat();
+    for r in 0..4 {
+        for c in 0..8 {
+            assert_eq!(layout.index(r, c), flat.index(r, c));
+        }
+    }
+}
+
+#[test]
+fn to_flat_hierarchical_layout() {
+    // Nested layout that flattens to 4 leaves
+    let layout = Layout::new(int!(int!(2, 3), int!(4, 5)), None);
+    let flat = layout.to_flat();
+    assert_eq!(flat.rank(), 4);
+    for i in 0..layout.size() {
+        assert_eq!(layout.call_1d(i), flat.call_1d(i), "mismatch at 1d index {i}");
+    }
+}

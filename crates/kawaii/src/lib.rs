@@ -6,6 +6,7 @@
 
 extern crate alloc;
 
+pub mod flat;
 
 use alloc::{
     format,
@@ -83,6 +84,12 @@ impl IntTuple {
     /// Turns `(4,2)` into `((4,2))` for vector layouts.
     pub fn wrap(self) -> IntTuple {
         IntTuple::Tuple(vec![self])
+    }
+
+    /// Flatten into a heap-free [`flat::FlatIntTuple`] for device use.
+    pub fn to_flat(&self) -> flat::FlatIntTuple {
+        let values = self.flatten();
+        flat::FlatIntTuple::new(&values)
     }
 }
 
@@ -344,6 +351,15 @@ impl Layout {
             && col >= 0
             && row < self.shape.get(0).as_int()
             && col < self.shape.get(1).as_int()
+    }
+
+    /// Flatten into a heap-free [`flat::FlatLayout`] for device use.
+    ///
+    /// Hierarchical nesting is collapsed — the result has one element per
+    /// leaf mode. This is sufficient for index computation on device but
+    /// does not preserve the tree structure needed for layout algebra.
+    pub fn to_flat(&self) -> flat::FlatLayout {
+        flat::FlatLayout::new(self.shape.to_flat(), self.stride.to_flat())
     }
 }
 
