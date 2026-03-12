@@ -351,3 +351,21 @@ fn test_grouping_and_flattening() {
     let e = c.flatten();
     assert_eq!(e.to_string(), "(2,3,5,7):(1,2,6,30)");
 }
+
+#[test]
+fn row_major_indices_match_expectations() {
+    let layout = Layout::row_major(3, 4);
+    assert_eq!(layout.index(2, 1), 9);
+    assert_eq!(layout.cosize(), 12);
+    assert!(layout.contains(2, 3));
+    assert!(!layout.contains(3, 0));
+}
+
+#[test]
+fn col_major_indices_match_expectations() {
+    let layout = Layout::col_major(3, 4);
+    assert_eq!(layout.index(2, 1), 5);
+    assert_eq!(layout.cosize(), 12);
+    assert!(layout.contains(0, 0));
+    assert!(!layout.contains(3, 4));
+}

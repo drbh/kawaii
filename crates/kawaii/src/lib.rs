@@ -6,7 +6,6 @@
 
 extern crate alloc;
 
-pub mod device;
 
 use alloc::{
     format,
@@ -316,6 +315,35 @@ impl Layout {
                     .collect(),
             ),
         }
+    }
+
+    /// Create a row-major 2D layout (stride = [cols, 1]).
+    pub fn row_major(rows: i64, cols: i64) -> Self {
+        Layout {
+            shape: int!(rows, cols),
+            stride: int!(cols, 1),
+        }
+    }
+
+    /// Create a column-major 2D layout (stride = [1, rows]).
+    pub fn col_major(rows: i64, cols: i64) -> Self {
+        Layout {
+            shape: int!(rows, cols),
+            stride: int!(1, rows),
+        }
+    }
+
+    /// Index into a 2D layout by (row, col). Equivalent to `call` with a 2-element coord.
+    pub fn index(&self, row: i64, col: i64) -> i64 {
+        self.call(&int!(row, col))
+    }
+
+    /// Check whether (row, col) is within bounds of a rank-2 layout.
+    pub fn contains(&self, row: i64, col: i64) -> bool {
+        row >= 0
+            && col >= 0
+            && row < self.shape.get(0).as_int()
+            && col < self.shape.get(1).as_int()
     }
 }
 
