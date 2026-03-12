@@ -2,7 +2,19 @@
 //!
 //! Based on: https://github.com/NVIDIA/cutlass
 
-use std::fmt::{self, Display};
+#![no_std]
+
+extern crate alloc;
+
+pub mod device;
+
+use alloc::{
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+use core::fmt::{self, Display};
 
 // IntTuple - Recursive integer or tuple type
 
@@ -348,7 +360,7 @@ impl Tile {
     }
 }
 
-impl std::ops::Index<usize> for Tile {
+impl core::ops::Index<usize> for Tile {
     type Output = Layout;
     fn index(&self, i: usize) -> &Self::Output {
         &self.0[i]
