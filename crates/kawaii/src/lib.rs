@@ -6,15 +6,100 @@
 
 extern crate alloc;
 
-pub mod device;
-
 use alloc::{
     format,
     string::{String, ToString},
     vec,
     vec::Vec,
 };
-use core::fmt::{self, Display};
+use core::{
+    convert::TryFrom,
+    fmt::{self, Display},
+};
+
+/// A fixed-rank integer tuple that can be used in `no_std` and device code without heap allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct StaticIntTuple<const R: usize> {
+    values: [usize; R],
+}
+
+impl<const R: usize> StaticIntTuple<R> {
+    pub const fn new(values: [usize; R]) -> Self {
+        Self { values }
+    }
+
+    pub const fn as_array(&self) -> [usize; R] {
+        self.values
+    }
+
+    pub const fn rank(&self) -> usize {
+        R
+    }
+}
+
+impl StaticIntTuple<2> {
+    pub const fn rows(&self) -> usize {
+        self.values[0]
+    }
+
+    pub const fn cols(&self) -> usize {
+        self.values[1]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StaticIntTupleConversionError {
+    ExpectedRank,
+    NegativeValue,
+    ValueTooLarge,
+}
+
+/// A heapless shape+stride pair for fixed-rank layout operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct StaticLayout<const R: usize> {
+    pub shape: StaticIntTuple<R>,
+    pub stride: StaticIntTuple<R>,
+}
+
+impl<const R: usize> StaticLayout<R> {
+    pub const fn new(shape: StaticIntTuple<R>, stride: StaticIntTuple<R>) -> Self {
+        Self { shape, stride }
+    }
+
+    pub const fn contains(&self, coord: [usize; R]) -> bool {
+        contains_coord(coord, &self.shape)
+    }
+
+    pub const fn index(&self, coord: [usize; R]) -> usize {
+        index_coord(coord, &self.stride)
+    }
+
+    pub const fn cosize(&self) -> usize {
+        cosize(&self.shape, &self.stride)
+    }
+}
+
+impl StaticLayout<2> {
+    pub const fn row_major(rows: usize, cols: usize) -> Self {
+        let shape = StaticIntTuple::new([rows, cols]);
+        Self::new(shape, compact_row_major_static(&shape))
+    }
+
+    pub const fn col_major(rows: usize, cols: usize) -> Self {
+        let shape = StaticIntTuple::new([rows, cols]);
+        Self::new(shape, compact_col_major_static(&shape))
+    }
+
+    pub const fn rows(&self) -> usize {
+        self.shape.rows()
+    }
+
+    pub const fn cols(&self) -> usize {
+        self.shape.cols()
+    }
+}
 
 // IntTuple - Recursive integer or tuple type
 
@@ -317,6 +402,138 @@ impl Layout {
             ),
         }
     }
+}
+
+impl<const R: usize> From<StaticIntTuple<R>> for IntTuple {
+    fn from(tuple: StaticIntTuple<R>) -> Self {
+        IntTuple::Tuple(
+            tuple
+                .as_array()
+                .into_iter()
+                .map(|value| IntTuple::Int(value as i64))
+                .collect(),
+        )
+    }
+}
+
+impl<const R: usize> TryFrom<&IntTuple> for StaticIntTuple<R> {
+    type Error = StaticIntTupleConversionError;
+
+    fn try_from(tuple: &IntTuple) -> Result<Self, Self::Error> {
+        Ok(Self::new(tuple_to_array(tuple)?))
+    }
+}
+
+impl<const R: usize> TryFrom<IntTuple> for StaticIntTuple<R> {
+    type Error = StaticIntTupleConversionError;
+
+    fn try_from(tuple: IntTuple) -> Result<Self, Self::Error> {
+        Self::try_from(&tuple)
+    }
+}
+
+fn tuple_to_array<const R: usize>(
+    tuple: &IntTuple,
+) -> Result<[usize; R], StaticIntTupleConversionError> {
+    match tuple {
+        IntTuple::Tuple(values) if values.len() == R => {
+            let mut result = [0; R];
+            let mut i = 0;
+            while i < R {
+                result[i] = int_to_usize(&values[i])?;
+                i += 1;
+            }
+            Ok(result)
+        }
+        _ => Err(StaticIntTupleConversionError::ExpectedRank),
+    }
+}
+
+fn int_to_usize(value: &IntTuple) -> Result<usize, StaticIntTupleConversionError> {
+    match value {
+        IntTuple::Int(n) if *n < 0 => Err(StaticIntTupleConversionError::NegativeValue),
+        IntTuple::Int(n) => {
+            usize::try_from(*n).map_err(|_| StaticIntTupleConversionError::ValueTooLarge)
+        }
+        IntTuple::Tuple(_) => Err(StaticIntTupleConversionError::ExpectedRank),
+    }
+}
+
+pub const fn contains_coord<const R: usize>(coord: [usize; R], shape: &StaticIntTuple<R>) -> bool {
+    let shape = shape.as_array();
+    let mut i = 0;
+    while i < R {
+        if coord[i] >= shape[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+pub const fn index_coord<const R: usize>(coord: [usize; R], stride: &StaticIntTuple<R>) -> usize {
+    let stride = stride.as_array();
+    let mut index = 0;
+    let mut i = 0;
+    while i < R {
+        index += coord[i] * stride[i];
+        i += 1;
+    }
+    index
+}
+
+pub const fn cosize<const R: usize>(
+    shape: &StaticIntTuple<R>,
+    stride: &StaticIntTuple<R>,
+) -> usize {
+    let shape_array = shape.as_array();
+    let mut i = 0;
+    while i < R {
+        if shape_array[i] == 0 {
+            return 0;
+        }
+        i += 1;
+    }
+
+    let mut coord = [0; R];
+    let mut j = 0;
+    while j < R {
+        coord[j] = shape_array[j] - 1;
+        j += 1;
+    }
+
+    index_coord(coord, stride) + 1
+}
+
+pub const fn compact_col_major_static<const R: usize>(
+    shape: &StaticIntTuple<R>,
+) -> StaticIntTuple<R> {
+    let shape = shape.as_array();
+    let mut stride = [0; R];
+    let mut current = 1;
+    let mut i = 0;
+    while i < R {
+        stride[i] = current;
+        current *= shape[i];
+        i += 1;
+    }
+    StaticIntTuple::new(stride)
+}
+
+pub const fn compact_row_major_static<const R: usize>(
+    shape: &StaticIntTuple<R>,
+) -> StaticIntTuple<R> {
+    let shape = shape.as_array();
+    let mut stride = [0; R];
+    let mut current = 1;
+    let mut i = R;
+    while i > 0 {
+        let idx = i - 1;
+        stride[idx] = current;
+        current *= shape[idx];
+        i -= 1;
+    }
+    StaticIntTuple::new(stride)
 }
 
 /// Concatenate layouts into a new layout.
@@ -1307,5 +1524,55 @@ pub fn print_1d(layout: &Layout) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        compact_col_major_static, compact_row_major_static, contains_coord, cosize, index_coord,
+        IntTuple, StaticIntTuple, StaticLayout,
+    };
+
+    #[test]
+    fn row_major_indices_match_expectations() {
+        let shape = StaticIntTuple::new([3, 4]);
+        let stride = compact_row_major_static(&shape);
+        assert_eq!(index_coord([2, 1], &stride), 9);
+        assert_eq!(cosize(&shape, &stride), 12);
+    }
+
+    #[test]
+    fn col_major_indices_match_expectations() {
+        let shape = StaticIntTuple::new([3, 4]);
+        let stride = compact_col_major_static(&shape);
+        assert_eq!(index_coord([2, 1], &stride), 5);
+        assert_eq!(cosize(&shape, &stride), 12);
+    }
+
+    #[test]
+    fn static_tuple_round_trips_through_int_tuple() {
+        let tuple = StaticIntTuple::new([3, 4]);
+        let dynamic = IntTuple::from(tuple);
+        assert_eq!(StaticIntTuple::<2>::try_from(dynamic).unwrap(), tuple);
+    }
+
+    #[test]
+    fn static_tuple_indexing_works_for_higher_rank() {
+        let shape = StaticIntTuple::<3>::new([2, 3, 4]);
+        let stride = compact_row_major_static(&shape);
+        assert!(contains_coord([1, 2, 3], &shape));
+        assert_eq!(index_coord([1, 2, 3], &stride), 23);
+        assert_eq!(cosize(&shape, &stride), 24);
+    }
+
+    #[test]
+    fn static_layout_pairs_shape_and_stride() {
+        let layout = StaticLayout::<2>::col_major(3, 4);
+        assert!(layout.contains([2, 1]));
+        assert_eq!(layout.index([2, 1]), 5);
+        assert_eq!(layout.cosize(), 12);
+        assert_eq!(layout.rows(), 3);
+        assert_eq!(layout.cols(), 4);
     }
 }
