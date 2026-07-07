@@ -1,6 +1,5 @@
 use kawaii::{
-    blocked_product, coalesce, complement, composition, int, logical_divide, logical_product,
-    IntTuple, Layout,
+    blocked_product, coalesce, complement, composition, int, logical_divide, logical_product, Layout,
 };
 
 // Property tests for layout algebra

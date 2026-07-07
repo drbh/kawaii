@@ -1,7 +1,7 @@
 use kawaii::{
     blocked_product, coalesce, coalesce_by_mode, complement, composition, composition_with_tile,
     flat_divide, int, logical_divide, logical_divide_with_tile, logical_product, raked_product,
-    tiled_divide, zipped_divide, IntTuple, Layout, Tile,
+    tiled_divide, zipped_divide, Layout, Tile,
 };
 
 // coalesce

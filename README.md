@@ -10,11 +10,12 @@ cargo run --example basic
 ```
 
 ```rust
-use kawaii::{int, print_2d, IntTuple, Layout};
+use kawaii::{int, layout, print_2d, IntTuple, Layout};
 
 fn main() {
     // Create a 4x6 matrix layout (column-major by default)
     let mut layout = Layout::new(int!(4, 6), Some(int!([1, 4])));
+    // or, equivalently: layout!((4, 6)) / layout!((4, 6), (1, 4))
 
     println!("Column-major 4x3 layout:");
     println!("{}", print_2d(&layout));
@@ -57,6 +58,38 @@ fn main() {
 // row 1, column 2 is at linear index: 8
 // row 3, column 5 is at linear index: 23
 ```
+
+### Beyond layout algebra
+
+On top of the CuTe layout/shape math, kawaii has the pieces needed to act as a
+kernel-side layout language:
+
+- **Swizzles** — `Swizzle` (runtime, for planning) and `StaticSwizzle<B, M, S>`
+  (const-generic, `const fn`, for device code): XOR-based index permutations for
+  bank-conflict-free shared memory. `SwizzledLayout` composes one with a layout,
+  `print_2d_swizzled` visualizes the result.
+- **Static lowering** — `Layout::to_static::<R>()` lowers a dynamic layout to a
+  flat, `Copy`, heap-free `StaticLayout<R>`. The intended split: do layout
+  algebra dynamically on the host, lower the result, and pass it to a kernel as
+  a monomorphized parameter. Construction infers rank from plain arrays —
+  `StaticLayout::new([32, 32], [96, 1])` — and `dims()` / `strides()` give the
+  arrays back.
+- **Thread/value ownership** — `TvLayout` is a rank-2 layout
+  `(thread, value) -> offset` describing which thread owns which elements.
+  `local_partition` / `local_tile` mirror CuTe's partitioning helpers.
+- **Debug rendering** — `print_tv` draws the thread-ownership map of a tile:
+
+```text
+(T32,V2) ((8,4),(1,2)):((1,8),(0,32))
+          0       1       2       3       4       5       6       7
+    +-------+-------+-------+-------+-------+-------+-------+-------+
+ 0  |  T0V0 |  T8V0 | T16V0 | T24V0 |  T0V1 |  T8V1 | T16V1 | T24V1 |
+    +-------+-------+-------+-------+-------+-------+-------+-------+
+ 1  |  T1V0 |  T9V0 | T17V0 | T25V0 |  T1V1 |  T9V1 | T17V1 | T25V1 |
+    ...
+```
+
+See `cargo run --example tv` for the full tour.
 
 ### References 
 https://docs.nvidia.com/cutlass/latest/media/docs/cpp/cute/index.html

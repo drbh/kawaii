@@ -17,11 +17,23 @@ use core::{
     fmt::{self, Display},
 };
 
+mod swizzle;
+mod tv;
+
+pub use swizzle::{print_2d_swizzled, StaticSwizzle, Swizzle, SwizzledLayout};
+pub use tv::{local_partition, local_tile, print_tv, print_tv_with, TvLayout};
+
 /// A fixed-rank integer tuple that can be used in `no_std` and device code without heap allocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct StaticIntTuple<const R: usize> {
     values: [usize; R],
+}
+
+/// Macro plumbing. Not part of the public API.
+#[doc(hidden)]
+pub mod __private {
+    pub use alloc::vec;
 }
 
 impl<const R: usize> StaticIntTuple<R> {
@@ -63,9 +75,31 @@ pub struct StaticLayout<const R: usize> {
     pub stride: StaticIntTuple<R>,
 }
 
+impl<const R: usize> From<[usize; R]> for StaticIntTuple<R> {
+    fn from(values: [usize; R]) -> Self {
+        Self::new(values)
+    }
+}
+
 impl<const R: usize> StaticLayout<R> {
-    pub const fn new(shape: StaticIntTuple<R>, stride: StaticIntTuple<R>) -> Self {
+    /// Rank is inferred from the arrays: `StaticLayout::new([32, 32], [96, 1])`.
+    pub const fn new(shape: [usize; R], stride: [usize; R]) -> Self {
+        Self {
+            shape: StaticIntTuple::new(shape),
+            stride: StaticIntTuple::new(stride),
+        }
+    }
+
+    pub const fn from_tuples(shape: StaticIntTuple<R>, stride: StaticIntTuple<R>) -> Self {
         Self { shape, stride }
+    }
+
+    pub const fn dims(&self) -> [usize; R] {
+        self.shape.as_array()
+    }
+
+    pub const fn strides(&self) -> [usize; R] {
+        self.stride.as_array()
     }
 
     pub const fn contains(&self, coord: [usize; R]) -> bool {
@@ -79,17 +113,28 @@ impl<const R: usize> StaticLayout<R> {
     pub const fn cosize(&self) -> usize {
         cosize(&self.shape, &self.stride)
     }
+
+    pub const fn size(&self) -> usize {
+        let shape = self.shape.as_array();
+        let mut product = 1;
+        let mut i = 0;
+        while i < R {
+            product *= shape[i];
+            i += 1;
+        }
+        product
+    }
 }
 
 impl StaticLayout<2> {
     pub const fn row_major(rows: usize, cols: usize) -> Self {
         let shape = StaticIntTuple::new([rows, cols]);
-        Self::new(shape, compact_row_major_static(&shape))
+        Self::from_tuples(shape, compact_row_major_static(&shape))
     }
 
     pub const fn col_major(rows: usize, cols: usize) -> Self {
         let shape = StaticIntTuple::new([rows, cols]);
-        Self::new(shape, compact_col_major_static(&shape))
+        Self::from_tuples(shape, compact_col_major_static(&shape))
     }
 
     pub const fn rows(&self) -> usize {
@@ -206,15 +251,29 @@ impl<T: Into<IntTuple>, const N: usize> From<[T; N]> for IntTuple {
 /// Construct an IntTuple from values. Use: `int!(2, 3)` or `int!(2, int!(3, 4))`.
 #[macro_export]
 macro_rules! int {
-    ($e:expr) => { IntTuple::from($e) };
-    ($($e:expr),+ $(,)?) => { IntTuple::Tuple(vec![$( int!($e) ),+]) };
+    ($e:expr) => { $crate::IntTuple::from($e) };
+    ($($e:expr),+ $(,)?) => {
+        $crate::IntTuple::Tuple($crate::__private::vec![$( $crate::int!($e) ),+])
+    };
 }
 
 /// Alias for int! to match CuTe's make_coord syntax.
 #[macro_export]
 macro_rules! make_coord {
-    ($e:expr) => { IntTuple::from($e) };
-    ($($e:expr),+ $(,)?) => { IntTuple::Tuple(vec![$( make_coord!($e) ),+]) };
+    ($($t:tt)+) => { $crate::int!($($t)+) };
+}
+
+/// Construct a dynamic [`Layout`]: `layout!((4, 6))` is compact column-major,
+/// `layout!((4, 6), (6, 1))` takes explicit strides. Shapes and strides may
+/// nest: `layout!((2, int!(2, 2)), (4, int!(2, 1)))`.
+#[macro_export]
+macro_rules! layout {
+    (($($shape:tt)+)) => {
+        $crate::Layout::new($crate::int!($($shape)+), None)
+    };
+    (($($shape:tt)+), ($($stride:tt)+)) => {
+        $crate::Layout::new($crate::int!($($shape)+), Some($crate::int!($($stride)+)))
+    };
 }
 
 // Layout - A (shape, stride) pair mapping coordinates to indices
@@ -449,6 +508,75 @@ fn tuple_to_array<const R: usize>(
     }
 }
 
+/// Errors from lowering a dynamic [`Layout`] to a [`StaticLayout`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LowerLayoutError {
+    /// The flattened layout does not have exactly R modes.
+    RankMismatch { expected: usize, actual: usize },
+    NegativeValue,
+    ValueTooLarge,
+}
+
+impl Layout {
+    /// Lower to a flat, fixed-rank static layout for device code. Nested
+    /// modes are flattened first; fails if the flat rank is not exactly `R`
+    /// or any extent/stride is negative or does not fit `usize`.
+    ///
+    /// This is the planning→execution handoff: do layout algebra dynamically
+    /// on the host, then lower the result into the `Copy`, heap-free form a
+    /// kernel can take as a parameter.
+    pub fn to_static<const R: usize>(&self) -> Result<StaticLayout<R>, LowerLayoutError> {
+        let shapes = self.shape.flatten();
+        let strides = self.stride.flatten();
+        if shapes.len() != R {
+            return Err(LowerLayoutError::RankMismatch {
+                expected: R,
+                actual: shapes.len(),
+            });
+        }
+        if strides.len() != R {
+            return Err(LowerLayoutError::RankMismatch {
+                expected: R,
+                actual: strides.len(),
+            });
+        }
+
+        let mut shape = [0usize; R];
+        let mut stride = [0usize; R];
+        let mut i = 0;
+        while i < R {
+            shape[i] = lower_int(shapes[i])?;
+            stride[i] = lower_int(strides[i])?;
+            i += 1;
+        }
+        Ok(StaticLayout::new(shape, stride))
+    }
+}
+
+fn lower_int(value: i64) -> Result<usize, LowerLayoutError> {
+    if value < 0 {
+        return Err(LowerLayoutError::NegativeValue);
+    }
+    usize::try_from(value).map_err(|_| LowerLayoutError::ValueTooLarge)
+}
+
+impl<const R: usize> TryFrom<&Layout> for StaticLayout<R> {
+    type Error = LowerLayoutError;
+
+    fn try_from(layout: &Layout) -> Result<Self, Self::Error> {
+        layout.to_static()
+    }
+}
+
+impl<const R: usize> From<StaticLayout<R>> for Layout {
+    fn from(layout: StaticLayout<R>) -> Self {
+        Layout {
+            shape: layout.shape.into(),
+            stride: layout.stride.into(),
+        }
+    }
+}
+
 fn int_to_usize(value: &IntTuple) -> Result<usize, StaticIntTupleConversionError> {
     match value {
         IntTuple::Int(n) if *n < 0 => Err(StaticIntTupleConversionError::NegativeValue),
@@ -601,7 +729,7 @@ impl Display for Tile {
 #[macro_export]
 macro_rules! tile {
     ($($layout:expr),+ $(,)?) => {
-        Tile::new(vec![$($layout),+])
+        $crate::Tile::new($crate::__private::vec![$($layout),+])
     };
 }
 
@@ -1025,6 +1153,55 @@ pub fn complement(layout: &Layout, cotarget: Option<i64>) -> Layout {
     }
 }
 
+/// Right inverse of a layout: a layout `R` with `layout(R(o)) == o` for all
+/// `o` in `[0, size)`. Requires the layout (after coalescing) to be a compact
+/// permutation of `[0, size)` — its modes, sorted by stride, must chain up
+/// with no gaps or overlaps. Panics otherwise.
+pub fn right_inverse(layout: &Layout) -> Layout {
+    let flat = coalesce(layout);
+    let shapes = flat.shape.flatten();
+    let strides = flat.stride.flatten();
+
+    // Colexicographic weight of each mode in the domain: the amount a unit
+    // step in that mode advances the 1D input index.
+    let mut weights = Vec::with_capacity(shapes.len());
+    let mut weight = 1i64;
+    for s in &shapes {
+        weights.push(weight);
+        weight *= s;
+    }
+
+    let mut order: Vec<usize> = (0..shapes.len()).collect();
+    order.sort_by_key(|&i| strides[i]);
+
+    let mut result_shapes = Vec::new();
+    let mut result_strides = Vec::new();
+    let mut next_stride = 1i64;
+    for &i in &order {
+        if shapes[i] == 1 {
+            continue;
+        }
+        assert!(
+            strides[i] == next_stride,
+            "right_inverse requires a compact permutation layout"
+        );
+        result_shapes.push(shapes[i]);
+        result_strides.push(weights[i]);
+        next_stride *= shapes[i];
+    }
+
+    if result_shapes.is_empty() {
+        return Layout::new(1i64, Some(IntTuple::Int(0)));
+    }
+    if result_shapes.len() == 1 {
+        return Layout::new(result_shapes[0], Some(IntTuple::Int(result_strides[0])));
+    }
+    Layout {
+        shape: IntTuple::Tuple(result_shapes.into_iter().map(IntTuple::Int).collect()),
+        stride: IntTuple::Tuple(result_strides.into_iter().map(IntTuple::Int).collect()),
+    }
+}
+
 /// Functional composition of layouts: result(c) = lhs(rhs(c)).
 pub fn composition(lhs: &Layout, rhs: &Layout) -> Layout {
     let lhs_flat = coalesce(lhs);
@@ -1440,6 +1617,45 @@ fn scale_stride(layout: &Layout, factor: i64) -> Layout {
 }
 
 // Visualization
+
+/// Render pre-computed cell labels as an ASCII table with row/column headers,
+/// in the same style as [`print_2d`]. Cell width adapts to the widest label.
+pub(crate) fn render_grid(title: &str, cells: &[Vec<String>]) -> String {
+    let rows = cells.len();
+    let cols = cells.first().map_or(0, |row| row.len());
+    let width = cells
+        .iter()
+        .flatten()
+        .map(|s| s.len())
+        .max()
+        .unwrap_or(1)
+        .max(1);
+
+    let mut lines = vec![title.to_string()];
+
+    let mut header = "   ".to_string();
+    for n in 0..cols {
+        header.push_str(&format!("{:>w$}", n, w = width + 3));
+    }
+    lines.push(header);
+
+    let sep = "    +".to_string()
+        + &(0..cols)
+            .map(|_| format!("{}+", "-".repeat(width + 2)))
+            .collect::<String>();
+    lines.push(sep.clone());
+
+    for (m, row) in cells.iter().enumerate().take(rows) {
+        let mut line = format!("{:>2}  |", m);
+        for cell in row {
+            line.push_str(&format!("{:>w$} |", cell, w = width + 1));
+        }
+        lines.push(line);
+        lines.push(sep.clone());
+    }
+
+    lines.join("\n")
+}
 
 /// Create an ASCII table visualization of a 2D layout.
 pub fn print_2d(layout: &Layout) -> String {

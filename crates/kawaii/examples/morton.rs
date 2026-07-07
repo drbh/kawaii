@@ -1,4 +1,4 @@
-use kawaii::{blocked_product, int, print_2d, IntTuple, Layout};
+use kawaii::{blocked_product, int, print_2d, Layout};
 
 // Based on
 // https://youtu.be/vzUhbDO_0qk?t=2499

@@ -1,4 +1,4 @@
-use kawaii::{int, print_2d, IntTuple, Layout};
+use kawaii::{int, print_2d, Layout};
 
 // Based on quick example in
 // https://youtu.be/vzUhbDO_0qk?t=2160
